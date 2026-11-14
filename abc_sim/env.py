@@ -511,6 +511,12 @@ class MuJoCoYAMEnv(gym.Env):
 
     def _step_single(self, action_14d: np.ndarray):
         """Apply a single 14D action and step physics."""
+        self.set_joint_targets(action_14d)
+        self.advance_physics()
+
+    def set_joint_targets(self, action_14d: np.ndarray) -> None:
+        """Set actuator position targets without advancing simulation time."""
+        action_14d = self._as_single_action(action_14d)
         ctrl = np.zeros(self.model.nu)
         for i in range(self.single_timestep_action_dim):
             val = action_14d[i]
@@ -519,7 +525,6 @@ class MuJoCoYAMEnv(gym.Env):
                 val = val * _GRIPPER_CTRL_MAX
             ctrl[self._ctrl_indices[i]] = val
         self.data.ctrl[:] = ctrl
-        self.advance_physics()
 
     def advance_physics(self, steps: int | None = None) -> None:
         """Advance MuJoCo physics while applying any task runtime controls."""

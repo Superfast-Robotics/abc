@@ -8,6 +8,7 @@ task randomization, and new sim environments all work from this package alone.
 **Contents**
 
 - [Quickstart](#quickstart)
+- [Continuous ZMQ simulator](#continuous-zmq-simulator)
 - [Environment API](#environment-api)
 - [Step vs Step Chunk](#step-vs-step-chunk)
 - [Tasks and Randomization](#tasks-and-randomization)
@@ -67,6 +68,81 @@ For a runnable example:
 ```bash
 uv run python abc_sim/example_api_rollout.py --task put_bottles --render-cameras
 ```
+
+## Continuous ZMQ simulator
+
+`python -m abc_sim.zmq_sim` runs one two-arm world continuously, replacing the
+real follower and camera nodes. External clients send joint targets and subscribe
+to observations; receiving a command or reading an observation never triggers a
+physics step. The Gym `step()` and `step_chunk()` paths above remain unchanged.
+
+For standalone use without policy packages or hardware drivers, install only:
+
+```bash
+uv venv .venv
+uv pip install --python .venv/bin/python "mujoco~=3.8.0" numpy gymnasium pyzmq tyro
+.venv/bin/python prepare.py --sim-package i2rt_yam
+.venv/bin/python -m abc_sim.zmq_sim --task empty
+```
+
+Other tasks use the same `--task` names as the Gym environment; first install
+their assets with `prepare.py --sim-task TASK`. `--scene-xml PATH` overrides a
+task's scene. The simulator resets the scene once at startup and runs until
+Ctrl+C or SIGTERM. `YAMEnv.reset()` sends the usual interpolated arm targets;
+it does not reset scene objects or simulation time.
+
+The existing `deploy.robot.communication` framing and IPC paths are reused:
+
+| Topic (`side` = `left` or `right`) | Simulator socket | Payload |
+| --- | --- | --- |
+| `leader_{side}_actions` | SUB, connect, latest message | `(7,)`: six joint targets in radians, normalized gripper target |
+| `follower_{side}_state` | PUB, bind | `(7,)`: six joint positions in radians, normalized gripper position |
+| `follower_{side}_obs` | PUB, bind | `(28,)`: position 7, velocity 7, effort 7, latest received command 7 |
+| `top_rgb`, `left_rgb`, `right_rgb` | PUB, bind | RGB `uint8`, `(H, W, 3)` |
+
+Gripper position is 0 closed / 1 open; its velocity is normalized travel per
+second. Arm velocities and efforts are rad/s and actuator torque in Nm.
+Gripper effort is converted from simulated slide force to nominal linear_4310
+motor torque using a signed motor stroke of -6.57 rad. This is an estimate,
+not a hardware-calibrated torque reading. The conventions follow the pinned
+[i2rt state conversion](https://github.com/arthurallshire/i2rt-drivers/blob/852f6fff33970fe9b882c53e6b28c66172c97291/i2rt/robots/motor_chain_robot.py#L324)
+and [linear gripper parameters](https://github.com/arthurallshire/i2rt-drivers/blob/852f6fff33970fe9b882c53e6b28c66172c97291/i2rt/robots/utils.py#L122).
+
+Commands accept the existing `extras.type`: absent or `"servo"` updates the
+target immediately; `"interp"` interpolates from the measured pose over two
+seconds while physics and publications continue. New commands replace the
+current target/interpolation. Malformed targets are reported and discarded.
+Without new commands, actuator inputs remain in place and physics continues.
+There is no command timeout, ownership, HAL, or OS policy in this executable.
+
+State and camera publication default to 30 Hz. Physics uses the task's existing
+fixed timestep and is paced against wall time, independently of command arrival.
+Rendering runs on the calling thread against a copied `MjData`; the physics/ZMQ
+thread owns the live data. Rendering does not hold the physics lock. This is
+best-effort real-time pacing, not a hard real-time guarantee.
+
+The header `timestamp` keeps its real deployment meaning (`perf_counter()` at
+publication). `extras.sim_time` additionally identifies the simulated sample or
+image snapshot time. Publications continue without commands, and an observation
+is not an acknowledgement that a particular target has been reached.
+
+Examples:
+
+```bash
+# Smaller images for a laptop; all three real camera topics are still published.
+.venv/bin/python -m abc_sim.zmq_sim --camera-width 224 --camera-height 168
+
+# Joint-only use, e.g. with the existing YAMEnv.step_state() client.
+.venv/bin/python -m abc_sim.zmq_sim --no-cameras
+
+# Mesh-free integration tests use the unmodified communication helpers and YAMEnv.
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+Run the existing ZMQ client instead of launching real follower/camera processes.
+The default IPC topics are identical, so do not run their real and simulated
+publishers simultaneously in the same user's IPC namespace. As with the real
+PUB/SUB path, clients must tolerate initial subscription message loss.
 
 ## Environment API
 
